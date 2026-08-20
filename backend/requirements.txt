@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-multipart
+PyMuPDF
+sentence-transformers
+groq
+numpy
+python-docx
+python-pptx
+openpyxl
+reportlab
+chromadb
+rank_bm25

@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+backend.venv/
+*.egg-info/
+
+# ChromaDB & reports (local data)
+backend/chroma_db/
+backend/reports/
+
+# Environment
+.env
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# VS Code
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
