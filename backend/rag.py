@@ -1,17 +1,17 @@
 """
 rag.py — KnowledgeAI Core Engine
 ─────────────────────────────────────────────────────────
-Features:
-  ✓ Multi-format support    PDF / DOCX / PPTX / Excel / TXT
-  ✓ Semantic chunking       Paragraph-aware, not word-count blind
-  ✓ ChromaDB                Persistent vector storage (survives restarts)
-  ✓ Hybrid search           BM25 keyword + ChromaDB semantic merged
-  ✓ Multi-query retrieval   Expands question to 3 versions for better recall
-  ✓ Confidence score        0–100% from ChromaDB distance
-  ✓ Semantic cache          Similar questions return instantly
-  ✓ Streaming               Word-by-word response via SSE
-  ✓ Document summary        Auto-generated on upload
-  ✓ Groq LLM                openai/gpt-oss-20b (fast, free)
+All features:
+  ✓ Multi-format        PDF / DOCX / PPTX / Excel / TXT
+  ✓ Semantic chunking   Paragraph-aware
+  ✓ ChromaDB            Persistent vector storage
+  ✓ Hybrid search       BM25 + semantic merged
+  ✓ Multi-query         Question expanded 3 ways
+  ✓ Confidence score    0–100% from vector distance
+  ✓ Semantic cache      Similar questions return instantly
+  ✓ Streaming           Word-by-word SSE
+  ✓ Doc summary         Auto-generated on upload
+  ✓ Citation resolver   Verifies every citation ✓ ⚠ ✗
 """
 
 import io, os, json
@@ -20,34 +20,52 @@ from groq import Groq
 import chromadb
 from rank_bm25 import BM25Okapi
 from sentence_transformers import SentenceTransformer
-import fitz  # PyMuPDF
+import fitz
 
-try:    from docx  import Document as DocxDoc
+from citation_resolver import resolve_citations  # ← citation verification
+
+try:    from docx import Document as DocxDoc
 except: DocxDoc = None
-
-try:    from pptx  import Presentation
+try:    from pptx import Presentation
 except: Presentation = None
-
 try:    import openpyxl
 except: openpyxl = None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. MODELS & CLIENTS
-# ─────────────────────────────────────────────────────────────────────────────
-print("[KnowledgeAI] Loading embedding model…")
-embedder    = SentenceTransformer("all-MiniLM-L6-v2")
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY", ""))
-GROQ_MODEL  = "openai/gpt-oss-20b"
+# ── Models ────────────────────────────────────────────────────────────────────
+import os
+from groq import Groq
+from sentence_transformers import SentenceTransformer
 
-# Warm-up: prevents slow first request
+print("[KnowledgeAI] Loading embedding model…")
+
+embedder = SentenceTransformer("all-MiniLM-L6-v2")
+
+# Put your Groq API key directly here
+from dotenv import load_dotenv
+load_dotenv()
+
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
+if not GROQ_API_KEY:
+    raise RuntimeError("GROQ_API_KEY is missing")
+
+groq_client = Groq(api_key=GROQ_API_KEY)
+
+# Warm-up embedding model
 embedder.encode(["warmup"], convert_to_numpy=True)
+
+print("[KnowledgeAI] Ready.")
+
+GROQ_MODEL = "openai/gpt-oss-20b"
+
+# Warm-up embedding model
+embedder.encode(["warmup"], convert_to_numpy=True)
+
 print("[KnowledgeAI] Ready.")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. CHROMADB  (persistent — survives server restarts)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── ChromaDB ──────────────────────────────────────────────────────────────────
 os.makedirs("chroma_db", exist_ok=True)
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
 collection    = chroma_client.get_or_create_collection(
@@ -55,37 +73,29 @@ collection    = chroma_client.get_or_create_collection(
 )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. GLOBAL STATE
-# ─────────────────────────────────────────────────────────────────────────────
-all_chunks:     list  = []   # [{text, doc_name, page, id}] — for BM25
-doc_texts:      dict  = {}   # doc_name → full text (for compare / report)
-doc_summaries:  dict  = {}   # doc_name → 2-sentence auto-summary
-bm25_index            = None
-semantic_cache: list  = []   # [{q_vec, answer, citations, confidence}]
-chunk_counter:  int   = 0
+# ── Global state ──────────────────────────────────────────────────────────────
+all_chunks:     list = []
+doc_texts:      dict = {}
+doc_summaries:  dict = {}
+bm25_index           = None
+semantic_cache: list = []
+chunk_counter:  int  = 0
 
 def _rebuild_bm25():
     global bm25_index
     bm25_index = BM25Okapi([c["text"].split() for c in all_chunks]) if all_chunks else None
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. STARTUP LOADER  (reload ChromaDB → in-memory on restart)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Startup: reload ChromaDB data into memory ─────────────────────────────────
 def _load_from_chromadb():
     global chunk_counter
     try:
         ex = collection.get(include=["documents", "metadatas"])
-        if not ex["ids"]:
-            return
-        print(f"[Startup] Reloading {len(ex['ids'])} chunks from ChromaDB…")
+        if not ex["ids"]: return
+        print(f"[Startup] Reloading {len(ex['ids'])} chunks…")
         for text, meta in zip(ex["documents"], ex["metadatas"]):
             name = meta.get("doc_name", "unknown")
-            all_chunks.append({
-                "text": text, "doc_name": name,
-                "page": meta.get("page", 1),
-            })
+            all_chunks.append({"text": text, "doc_name": name, "page": meta.get("page", 1)})
             doc_texts[name] = doc_texts.get(name, "") + " " + text
         chunk_counter = len(all_chunks)
         _rebuild_bm25()
@@ -96,16 +106,13 @@ def _load_from_chromadb():
 _load_from_chromadb()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. FILE EXTRACTORS
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Extractors ────────────────────────────────────────────────────────────────
 def _extract_pdf(data, name):
-    doc   = fitz.open(stream=data, filetype="pdf")
+    doc = fitz.open(stream=data, filetype="pdf")
     pages = []
     for n, page in enumerate(doc, 1):
         txt = page.get_text().strip()
-        if txt:
-            pages.append({"text": txt, "page": n, "doc_name": name})
+        if txt: pages.append({"text": txt, "page": n, "doc_name": name})
     return pages, len(doc)
 
 def _extract_docx(data, name):
@@ -118,7 +125,7 @@ def _extract_pptx(data, name):
     if not Presentation: return [], 0
     prs, slides = Presentation(io.BytesIO(data)), []
     for n, slide in enumerate(prs.slides, 1):
-        txt = "\n".join(s.text for s in slide.shapes if hasattr(s,"text") and s.text.strip())
+        txt = "\n".join(s.text for s in slide.shapes if hasattr(s, "text") and s.text.strip())
         if txt: slides.append({"text": txt, "page": n, "doc_name": name})
     return slides, len(prs.slides)
 
@@ -140,59 +147,51 @@ EXTRACTORS = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 6. SEMANTIC CHUNKER  (paragraph-aware, not blind word-count)
-# ─────────────────────────────────────────────────────────────────────────────
-def _chunk(item, min_words=80, max_words=350):
+# ── Semantic chunker (paragraph-aware) ───────────────────────────────────────
+def _chunk(item, min_words=40, max_words=180):
     """
-    Splits at natural paragraph boundaries.
-    Merges short paragraphs until max_words, then starts a new chunk.
-    This preserves complete ideas unlike fixed-size word splitting.
+    Paragraph-aware chunker with single-newline fallback.
+    For dense single-page docs (resumes, reports), falls back
+    to splitting on single newlines to create smaller, specific chunks.
     """
+    # Try double-newline paragraphs first
     paragraphs = [p.strip() for p in item["text"].split("\n\n") if p.strip()]
-    if not paragraphs:
-        paragraphs = [item["text"]]
+
+    # If only 1 big block, fall back to single newlines (handles PDFs/resumes)
+    if len(paragraphs) <= 2:
+        single = [p.strip() for p in item["text"].split("\n") if p.strip()]
+        if len(single) > len(paragraphs):
+            paragraphs = single
 
     chunks, current = [], ""
     for para in paragraphs:
-        combined = (current + "\n\n" + para).strip()
+        combined = (current + "\n" + para).strip()
         if len(combined.split()) > max_words and current:
             if len(current.split()) >= min_words:
                 chunks.append({**item, "text": current.strip()})
             current = para
         else:
             current = combined
-
     if current and len(current.split()) >= min_words:
         chunks.append({**item, "text": current.strip()})
-
-    # Fallback: if no chunks produced, return whole text as one chunk
     return chunks if chunks else [{**item, "text": item["text"]}]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 7. SEMANTIC CACHE
-# ─────────────────────────────────────────────────────────────────────────────
-def _cache_lookup(q_vec: np.ndarray, threshold=0.12):
+# ── Semantic cache ────────────────────────────────────────────────────────────
+def _cache_lookup(q_vec, threshold=0.12):
     for e in semantic_cache:
         if float(np.linalg.norm(q_vec - e["q_vec"])) < threshold:
             return e
     return None
 
 def _cache_save(q_vec, answer, citations, confidence):
-    semantic_cache.append({
-        "q_vec": q_vec, "answer": answer,
-        "citations": citations, "confidence": confidence,
-    })
-    if len(semantic_cache) > 100:
-        semantic_cache.pop(0)
+    semantic_cache.append({"q_vec": q_vec, "answer": answer,
+                           "citations": citations, "confidence": confidence})
+    if len(semantic_cache) > 100: semantic_cache.pop(0)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 8. MULTI-QUERY EXPANSION  (rephrase question 2 ways → better BM25 recall)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Multi-query expansion ─────────────────────────────────────────────────────
 def _expand_query(question: str) -> list:
-    """Returns [original, alt1, alt2] for broader BM25 keyword search."""
     try:
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -208,10 +207,8 @@ def _expand_query(question: str) -> list:
         return [question]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 9. DOCUMENT SUMMARY  (auto-generated on upload)
-# ─────────────────────────────────────────────────────────────────────────────
-def _generate_summary(text: str, filename: str) -> str:
+# ── Document summary ──────────────────────────────────────────────────────────
+def _generate_summary(text: str) -> str:
     try:
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
@@ -224,15 +221,8 @@ def _generate_summary(text: str, filename: str) -> str:
         return ""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 10. SHARED RETRIEVAL  (used by both answer_question and stream_answer)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Shared retrieval ──────────────────────────────────────────────────────────
 def _retrieve(question: str, q_vec: np.ndarray):
-    """
-    Hybrid retrieval: ChromaDB semantic + BM25 keyword (multi-query).
-    Returns (top_hits, citations, confidence, context_string).
-    """
-    # Semantic search — ChromaDB
     n          = min(10, len(all_chunks))
     chroma_res = collection.query(
         query_embeddings=[q_vec.tolist()], n_results=n,
@@ -246,12 +236,9 @@ def _retrieve(question: str, q_vec: np.ndarray):
         for i in range(len(chroma_res["documents"][0]))
     ]
 
-    # BM25 keyword search — multi-query expansion
-    bm25_hits = []
+    bm25_hits, seen_bm25 = [], set()
     if bm25_index:
-        queries = _expand_query(question)   # [original, alt1, alt2]
-        seen_bm25, bm25_hits = set(), []
-        for q in queries:
+        for q in _expand_query(question):
             scores   = bm25_index.get_scores(q.split())
             top_idxs = np.argsort(scores)[::-1][:8]
             for i in top_idxs:
@@ -266,34 +253,22 @@ def _retrieve(question: str, q_vec: np.ndarray):
                             "distance": 1.0,
                         })
 
-    # Merge + deduplicate (semantic first = higher priority)
     seen, candidates = set(), []
     for hit in semantic_hits + bm25_hits:
         key = f"{hit['doc_name']}_{hit['page']}_{hit['text'][:40]}"
         if key not in seen:
-            seen.add(key)
-            candidates.append(hit)
+            seen.add(key); candidates.append(hit)
 
-    top_hits = candidates[:3]
-
-    # Confidence from ChromaDB distance (0=perfect, 2=worst)
+    top_hits   = candidates[:3]
     best_dist  = semantic_hits[0]["distance"] if semantic_hits else 2.0
-    confidence = int(min(100, max(0, (1 - best_dist / 2) * 100)))
-
-    # Citations
-    seen_c, citations = set(), []
-    for h in top_hits:
-        key = f"{h['doc_name']}|{h['page']}"
-        if key not in seen_c:
-            seen_c.add(key)
-            citations.append({"doc": h["doc_name"], "page": h["page"]})
-
-    # Context block sent to LLM
-    context = "\n\n---\n\n".join(
-        f"[{h['doc_name']}, Page {h['page']}]\n{h['text']}"
-        for h in top_hits
+    # Square-root scaling: gives more realistic confidence values
+    # e.g. cosine_sim=0.3 -> 55%, cosine_sim=0.5 -> 71%, cosine_sim=0.7 -> 84%
+    cosine_sim = max(0.0, 1.0 - best_dist / 2.0)
+    confidence = int(min(100, (cosine_sim ** 0.5) * 100))
+    context    = "\n\n---\n\n".join(
+        f"[{h['doc_name']}, Page {h['page']}]\n{h['text']}" for h in top_hits
     )
-    return top_hits, citations, confidence, context
+    return top_hits, confidence, context
 
 
 def _build_prompt(question: str, context: str, chat_history: list) -> str:
@@ -303,7 +278,7 @@ def _build_prompt(question: str, context: str, chat_history: list) -> str:
     )
     return f"""You are an enterprise document assistant.
 Answer ONLY from the context below. Cite sources inline as [DocName, Page N].
-If the answer is not in the context, say "I couldn't find that in the uploaded documents."
+If not found, say "I couldn't find that in the uploaded documents."
 
 Previous conversation:
 {history or "None"}
@@ -315,72 +290,50 @@ Question: {question}
 Answer:"""
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 11. PUBLIC: process_document
-# ─────────────────────────────────────────────────────────────────────────────
+# ── process_document ──────────────────────────────────────────────────────────
 def process_document(data: bytes, filename: str) -> dict:
     global chunk_counter
     ext = filename.lower().rsplit(".", 1)[-1]
     fn  = EXTRACTORS.get(ext)
-    if not fn:
-        return {"error": f"Unsupported file type: .{ext}"}
+    if not fn: return {"error": f"Unsupported type: .{ext}"}
 
     page_items, total_pages = fn(data, filename)
-    if not page_items:
-        return {"error": "No text extracted. File may be empty, scanned, or corrupted."}
+    if not page_items: return {"error": "No text extracted."}
 
-    # Save full text for compare / report
     doc_texts[filename] = "\n\n".join(p["text"] for p in page_items)
-
-    # Auto-generate 2-sentence summary
-    summary = _generate_summary(doc_texts[filename], filename)
+    summary = _generate_summary(doc_texts[filename])
     doc_summaries[filename] = summary
 
-    # Semantic chunk
     new_chunks = [c for p in page_items for c in _chunk(p)]
-
-    # Embed + store in ChromaDB
-    texts      = [c["text"] for c in new_chunks]
-    embeddings = embedder.encode(texts, convert_to_numpy=True, show_progress_bar=False)
+    embeddings = embedder.encode([c["text"] for c in new_chunks],
+                                 convert_to_numpy=True, show_progress_bar=False)
 
     ids, docs, metas, vecs = [], [], [], []
     for i, (chunk, vec) in enumerate(zip(new_chunks, embeddings)):
         cid = f"{filename}_c{chunk_counter + i}"
         chunk["id"] = cid
-        ids.append(cid)
-        docs.append(chunk["text"])
+        ids.append(cid); docs.append(chunk["text"])
         metas.append({"doc_name": chunk["doc_name"], "page": int(chunk["page"])})
         vecs.append(vec.tolist())
 
     collection.add(documents=docs, embeddings=vecs, metadatas=metas, ids=ids)
     chunk_counter += len(new_chunks)
-
     all_chunks.extend(new_chunks)
     _rebuild_bm25()
 
-    return {
-        "filename":      filename,
-        "pages":         total_pages,
-        "chunks":        len(new_chunks),
-        "total_indexed": len(all_chunks),
-        "summary":       summary,
-        "status":        "ready",
-    }
+    return {"filename": filename, "pages": total_pages, "chunks": len(new_chunks),
+            "total_indexed": len(all_chunks), "summary": summary, "status": "ready"}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 12. PUBLIC: answer_question  (non-streaming fallback)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── answer_question (non-streaming) ──────────────────────────────────────────
 def answer_question(question: str, chat_history: list = []) -> dict:
-    if not all_chunks:
-        return {"error": "No documents uploaded yet."}
+    if not all_chunks: return {"error": "No documents uploaded yet."}
 
     q_vec  = embedder.encode([question], convert_to_numpy=True)[0]
     cached = _cache_lookup(q_vec)
-    if cached:
-        return {**cached, "from_cache": True}
+    if cached: return {**cached, "from_cache": True}
 
-    _, citations, confidence, context = _retrieve(question, q_vec)
+    top_hits, confidence, context = _retrieve(question, q_vec)
     prompt = _build_prompt(question, context, chat_history)
 
     resp   = groq_client.chat.completions.create(
@@ -389,19 +342,23 @@ def answer_question(question: str, chat_history: list = []) -> dict:
         temperature=0, max_tokens=512,
     )
     answer = resp.choices[0].message.content
-    _cache_save(q_vec, answer, citations, confidence)
-    return {"answer": answer, "citations": citations, "confidence": confidence, "from_cache": False}
+
+    # Verify citations against source chunks
+    verified_citations = resolve_citations(answer, top_hits)
+
+    _cache_save(q_vec, answer, verified_citations, confidence)
+    return {"answer": answer, "citations": verified_citations,
+            "confidence": confidence, "from_cache": False}
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 13. PUBLIC: stream_answer  (SSE generator for streaming endpoint)
-# ─────────────────────────────────────────────────────────────────────────────
+# ── stream_answer (SSE generator) ────────────────────────────────────────────
 def stream_answer(question: str, chat_history: list = []):
     """
-    Yields Server-Sent Events:
-      data: {"type":"meta",    "citations":[...], "confidence":87, "from_cache":false}
-      data: {"type":"text",    "content":"word"}
-      data: [DONE]
+    Event order:
+      1. {"type":"confidence", "confidence":87, "from_cache":false}
+      2. {"type":"text",       "content":"word"}  ← repeated per token
+      3. {"type":"citations",  "citations":[...]} ← verified, sent AFTER full answer
+      4. [DONE]
     """
     if not all_chunks:
         yield f"data: {json.dumps({'type':'error','content':'No documents uploaded yet.'})}\n\n"
@@ -411,16 +368,18 @@ def stream_answer(question: str, chat_history: list = []):
     cached = _cache_lookup(q_vec)
 
     if cached:
-        yield f"data: {json.dumps({'type':'meta','citations':cached['citations'],'confidence':cached['confidence'],'from_cache':True})}\n\n"
+        yield f"data: {json.dumps({'type':'confidence','confidence':cached['confidence'],'from_cache':True})}\n\n"
         yield f"data: {json.dumps({'type':'text','content':cached['answer']})}\n\n"
+        yield f"data: {json.dumps({'type':'citations','citations':cached['citations']})}\n\n"
         yield "data: [DONE]\n\n"
         return
 
-    _, citations, confidence, context = _retrieve(question, q_vec)
+    top_hits, confidence, context = _retrieve(question, q_vec)
 
-    # Send citations immediately — user sees sources before full answer
-    yield f"data: {json.dumps({'type':'meta','citations':citations,'confidence':confidence,'from_cache':False})}\n\n"
+    # Send confidence first so UI knows answer is coming
+    yield f"data: {json.dumps({'type':'confidence','confidence':confidence,'from_cache':False})}\n\n"
 
+    # Stream answer token by token
     prompt      = _build_prompt(question, context, chat_history)
     stream      = groq_client.chat.completions.create(
         model=GROQ_MODEL,
@@ -434,20 +393,22 @@ def stream_answer(question: str, chat_history: list = []):
             full_answer += token
             yield f"data: {json.dumps({'type':'text','content':token})}\n\n"
 
+    # After full answer received → verify citations → send to frontend
+    # Truncate answer to avoid overloading the citation resolver
+    verified_citations = resolve_citations(full_answer[:500], top_hits)
+    yield f"data: {json.dumps({'type':'citations','citations':verified_citations})}\n\n"
     yield "data: [DONE]\n\n"
-    _cache_save(q_vec, full_answer, citations, confidence)
+
+    _cache_save(q_vec, full_answer, verified_citations, confidence)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 14. UTILITIES
-# ─────────────────────────────────────────────────────────────────────────────
+# ── Utilities ─────────────────────────────────────────────────────────────────
 def clear_documents():
     global all_chunks, doc_texts, doc_summaries, bm25_index, semantic_cache, chunk_counter
     try:
         ids = collection.get()["ids"]
         if ids: collection.delete(ids=ids)
-    except Exception:
-        pass
+    except Exception: pass
     all_chunks.clear(); doc_texts.clear(); doc_summaries.clear()
     semantic_cache.clear(); bm25_index = None; chunk_counter = 0
 

@@ -7,7 +7,6 @@ const post = (url, body) =>
 const get  = (url) => fetch(API + url).then(r => r.json())
 const del_ = (url) => fetch(API + url, { method:"DELETE" }).then(r => r.json())
 
-// ── Style tokens ──────────────────────────────────────────────────────────────
 const S = {
   app:  { display:"flex", height:"100vh", fontFamily:"system-ui,sans-serif", background:"#f9fafb", color:"#111827" },
   side: { width:220, background:"#fff", borderRight:"1px solid #e5e7eb", display:"flex", flexDirection:"column", padding:16, gap:4 },
@@ -28,6 +27,39 @@ const S = {
   tag:  (bg="#eff6ff",c="#2563eb") => ({ fontSize:11, padding:"2px 8px", borderRadius:20, background:bg, color:c, fontWeight:500 }),
   grid: { display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(160px,1fr))", gap:12, marginBottom:20 },
   stat: { background:"#fff", border:"1px solid #e5e7eb", borderRadius:10, padding:16, textAlign:"center" },
+}
+
+// ── Citation verification badge ───────────────────────────────────────────────
+// Shows: status icon + doc name + page + confidence %
+// Hover to see exact quote and reason from the resolver
+const CITATION_STYLES = {
+  verified:   { bg:"#f0fdf4", color:"#15803d", icon:"✓" },
+  partial:    { bg:"#fefce8", color:"#854d0e", icon:"⚠" },
+  incorrect:  { bg:"#fef2f2", color:"#b91c1c", icon:"✗" },
+  unrelated:  { bg:"#f5f3ff", color:"#6d28d9", icon:"?" },
+  unverified: { bg:"#f3f4f6", color:"#6b7280", icon:"~" },
+}
+
+function CitationTag({ c }) {
+  const s       = CITATION_STYLES[c.status] || CITATION_STYLES.unverified
+  const tooltip = [
+    `${c.status?.toUpperCase()} (${c.confidence}% confident)`,
+    c.reason      ? `Reason: ${c.reason}` : "",
+    c.exact_quote ? `Quote: "${c.exact_quote}"` : "",
+  ].filter(Boolean).join("\n")
+
+  return (
+    <span title={tooltip} style={{
+      fontSize:11, padding:"3px 9px", borderRadius:20,
+      background:s.bg, color:s.color, fontWeight:500,
+      cursor:"help", userSelect:"none",
+      display:"inline-flex", alignItems:"center", gap:4,
+    }}>
+      <span>{s.icon}</span>
+      <span>{c.doc} · p.{c.page}</span>
+      <span style={{opacity:0.7}}>· {c.confidence}%</span>
+    </span>
+  )
 }
 
 // ── Upload with progress bar ──────────────────────────────────────────────────
@@ -66,7 +98,7 @@ function UploadBtn({ onDone, label="+ Upload" }) {
   )
 }
 
-// ── Copy button ───────────────────────────────────────────────────────────────
+// ── Copy button ────────────────────────────────────────────────────────────────
 function CopyBtn({ text }) {
   const [copied, setCopied] = useState(false)
   return (
@@ -84,9 +116,7 @@ function Dashboard() {
   const load = () => get("/stats").then(setD)
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t) }, [])
   if (!d) return <div style={{ padding:24, color:"#9ca3af" }}>Loading…</div>
-
   const docIcon = n => n.endsWith(".pdf")?"📕":n.endsWith(".docx")?"📘":n.endsWith(".pptx")?"📙":n.endsWith(".xlsx")?"📗":"📄"
-
   return (
     <div style={S.body}>
       <div style={S.grid}>
@@ -99,7 +129,6 @@ function Dashboard() {
           </div>
         ))}
       </div>
-
       <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:16}}>
         <div style={S.card}>
           <div style={{fontSize:14,fontWeight:600,marginBottom:12}}>Uploaded documents</div>
@@ -114,8 +143,7 @@ function Dashboard() {
                     <div style={{fontSize:11,color:"#9ca3af"}}>{doc.pages}p · {doc.chunks} chunks · {doc.uploaded_at}</div>
                   </div>
                 </div>
-                {/* Auto-generated summary */}
-                {doc.summary && (
+                {doc.summary&&(
                   <div style={{fontSize:12,color:"#6b7280",lineHeight:1.5,
                                background:"#f9fafb",padding:"6px 10px",borderRadius:6,marginLeft:28}}>
                     {doc.summary}
@@ -124,8 +152,8 @@ function Dashboard() {
               </div>
             ))
           }
-          {d.documents.length>0 &&
-            <button onClick={async()=>{ if(confirm("Clear all?")){ await del_("/documents"); load() }}}
+          {d.documents.length>0&&
+            <button onClick={async()=>{if(confirm("Clear all?")){await del_("/documents");load()}}}
               style={{...S.btn("danger"),marginTop:12,fontSize:12}}>Clear all</button>
           }
         </div>
@@ -157,35 +185,29 @@ function Chat() {
   useEffect(() => { loadDocs() }, [])
   useEffect(() => { end.current?.scrollIntoView({ behavior:"smooth" }) }, [msgs, streamingMsg])
 
-  // ── Drag and drop ────────────────────────────────────────────────────────
   async function handleDrop(e) {
     e.preventDefault(); setDragging(false)
     const files = [...e.dataTransfer.files].filter(f =>
       [".pdf",".docx",".pptx",".xlsx",".txt"].some(ext => f.name.toLowerCase().endsWith(ext))
     )
-    for (const f of files) {
-      const fm = new FormData(); fm.append("file", f)
-      await fetch(`${API}/upload`, { method:"POST", body:fm })
-    }
+    for (const f of files) { const fm=new FormData(); fm.append("file",f); await fetch(`${API}/upload`,{method:"POST",body:fm}) }
     if (files.length) loadDocs()
   }
 
-  // ── Export chat ──────────────────────────────────────────────────────────
   function exportChat() {
     if (!msgs.length) return alert("No chat to export yet.")
     const date  = new Date().toISOString().slice(0,10)
     const lines = msgs.map(m => {
       const role    = m.role==="user" ? "You" : "KnowledgeAI"
-      const sources = m.citations?.map(c=>`${c.doc} p.${c.page}`).join(", ")
-      return `[${role}]\n${m.content}${sources?`\n📎 Sources: ${sources}`:""}`
+      const sources = m.citations?.map(c => `${c.doc} p.${c.page} [${c.status||""}]`).join(", ")
+      return `[${role}]\n${m.content}${sources ? `\n📎 Sources: ${sources}` : ""}`
     }).join(`\n\n${"─".repeat(40)}\n\n`)
     const blob = new Blob([`KnowledgeAI Chat — ${date}\n${"═".repeat(40)}\n\n${lines}`], {type:"text/plain"})
     const url  = URL.createObjectURL(blob)
-    const a    = Object.assign(document.createElement("a"), {href:url, download:`chat_${date}.txt`})
-    a.click(); URL.revokeObjectURL(url)
+    Object.assign(document.createElement("a"), {href:url, download:`chat_${date}.txt`}).click()
+    URL.revokeObjectURL(url)
   }
 
-  // ── Streaming send ────────────────────────────────────────────────────────
   async function send() {
     const q = inp.trim(); if (!q || busy) return
     setInp("")
@@ -201,66 +223,96 @@ function Chat() {
       })
       const reader  = res.body.getReader()
       const decoder = new TextDecoder()
-      let streamed  = "", citations=[], confidence=undefined, from_cache=false
+      let streamed="", citations=[], confidence=undefined, from_cache=false
 
       while (true) {
         const {done, value} = await reader.read(); if (done) break
-        const lines = decoder.decode(value,{stream:true}).split("\n").filter(l=>l.startsWith("data: "))
+        const lines = decoder.decode(value, {stream:true}).split("\n").filter(l => l.startsWith("data: "))
+
         for (const line of lines) {
-          const raw = line.slice(6); if (raw==="[DONE]") break
+          const raw = line.slice(6); if (raw === "[DONE]") break
           try {
             const data = JSON.parse(raw)
-            if (data.type==="meta") {
-              citations=data.citations||[]; confidence=data.confidence; from_cache=data.from_cache
-              setStreamingMsg(p=>({...p, citations, confidence, from_cache}))
-            } else if (data.type==="text") {
+
+            if (data.type === "confidence") {
+              // Step 1: confidence received before streaming starts
+              confidence = data.confidence; from_cache = data.from_cache
+              setStreamingMsg(p => ({...p, confidence, from_cache}))
+
+            } else if (data.type === "text") {
+              // Step 2: answer streaming token by token
               streamed += data.content
-              setStreamingMsg(p=>({...p, content:streamed}))
-            } else if (data.type==="error") {
-              streamed = "⚠️ "+data.content
-              setStreamingMsg(p=>({...p, content:streamed}))
+              setStreamingMsg(p => ({...p, content:streamed}))
+
+            } else if (data.type === "citations") {
+              // Step 3: verified citations arrive AFTER full answer
+              citations = data.citations || []
+              setStreamingMsg(p => ({...p, citations}))
+
+            } else if (data.type === "error") {
+              streamed = "⚠️ " + data.content
+              setStreamingMsg(p => ({...p, content:streamed}))
             }
-          } catch(_) {}
+          } catch (_) {}
         }
       }
-      setMsgs(p=>[...p,{role:"assistant",content:streamed,citations,confidence,from_cache}])
-    } catch(err) {
-      setMsgs(p=>[...p,{role:"assistant",content:"⚠️ Connection error. Please try again.",citations:[]}])
+
+      setMsgs(p => [...p, {role:"assistant", content:streamed, citations, confidence, from_cache}])
+    } catch (err) {
+      setMsgs(p => [...p, {role:"assistant", content:"⚠️ Connection error. Try again.", citations:[]}])
     }
+
     setStreamingMsg(null); setBusy(false)
   }
 
-  // ── Message bubble ────────────────────────────────────────────────────────
   function Bubble({m, streaming=false}) {
-    const isAI = m.role==="assistant"
+    const isAI = m.role === "assistant"
+    // Show verifying spinner while answer streams but citations haven't arrived yet
+    const verifying = streaming && m.content && !m.citations?.length
+
     return (
-      <div style={{display:"flex",flexDirection:"column",alignItems:isAI?"flex-start":"flex-end"}}>
-        <div style={{maxWidth:"72%",padding:"10px 14px",borderRadius:12,fontSize:13,
-                     lineHeight:1.7,whiteSpace:"pre-wrap",
-                     background:isAI?"#fff":"#2563eb",
-                     color:isAI?"#111827":"#fff",
-                     border:isAI?"1px solid #e5e7eb":"none"}}>
+      <div style={{display:"flex", flexDirection:"column", alignItems:isAI?"flex-start":"flex-end"}}>
+        <div style={{
+          maxWidth:"72%", padding:"10px 14px", borderRadius:12, fontSize:13,
+          lineHeight:1.7, whiteSpace:"pre-wrap",
+          background:isAI?"#fff":"#2563eb",
+          color:isAI?"#111827":"#fff",
+          border:isAI?"1px solid #e5e7eb":"none",
+        }}>
           {m.content}
-          {streaming&&<span style={{animation:"blink 0.8s step-end infinite",marginLeft:2}}>▌</span>}
+          {streaming && <span style={{animation:"blink 0.8s step-end infinite", marginLeft:2}}>▌</span>}
         </div>
-        {isAI&&(
-          <div style={{display:"flex",gap:6,marginTop:5,flexWrap:"wrap",alignItems:"center"}}>
-            {/* Page citations */}
-            {m.citations?.map((c,j)=>(
-              <span key={j} style={S.tag("#f0fdf4","#15803d")}>📎 {c.doc} · p.{c.page}</span>
-            ))}
-            {/* Confidence badge */}
-            {m.confidence!==undefined&&(
-              <span style={{fontSize:11,padding:"2px 8px",borderRadius:20,fontWeight:500,
-                            background:m.confidence>=70?"#eff6ff":m.confidence>=40?"#fefce8":"#fef2f2",
-                            color:m.confidence>=70?"#1d4ed8":m.confidence>=40?"#854d0e":"#b91c1c"}}>
+
+        {isAI && (
+          <div style={{display:"flex", gap:6, marginTop:5, flexWrap:"wrap", alignItems:"center"}}>
+
+            {/* Verified citation badges — ✓ ⚠ ✗ ? ~ */}
+            {m.citations?.map((c, j) => <CitationTag key={j} c={c} />)}
+
+            {/* Spinner while verifying (after answer finishes) */}
+            {verifying && (
+              <span style={{fontSize:11, color:"#9ca3af", display:"flex", alignItems:"center", gap:4}}>
+                <span style={{animation:"spin 1s linear infinite", display:"inline-block"}}>⟳</span>
+                Verifying citations…
+              </span>
+            )}
+
+            {/* Answer confidence badge */}
+            {m.confidence !== undefined && (
+              <span style={{
+                fontSize:11, padding:"2px 8px", borderRadius:20, fontWeight:500,
+                background:m.confidence>=70?"#eff6ff":m.confidence>=40?"#fefce8":"#fef2f2",
+                color:m.confidence>=70?"#1d4ed8":m.confidence>=40?"#854d0e":"#b91c1c",
+              }}>
                 {m.confidence>=70?"✓":m.confidence>=40?"~":"?"} {m.confidence}% confident
               </span>
             )}
+
             {/* Cache badge */}
-            {m.from_cache&&<span style={S.tag("#f5f3ff","#6d28d9")}>⚡ from cache</span>}
+            {m.from_cache && <span style={S.tag("#f5f3ff","#6d28d9")}>⚡ from cache</span>}
+
             {/* Copy button */}
-            {m.content&&!streaming&&<CopyBtn text={m.content}/>}
+            {m.content && !streaming && <CopyBtn text={m.content} />}
           </div>
         )}
       </div>
@@ -268,85 +320,80 @@ function Chat() {
   }
 
   return (
-    <div style={{...S.main,height:"100%",position:"relative"}}
-         onDragOver={e=>{e.preventDefault();setDragging(true)}}
-         onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget))setDragging(false)}}
+    <div style={{...S.main, height:"100%", position:"relative"}}
+         onDragOver={e => {e.preventDefault(); setDragging(true)}}
+         onDragLeave={e => {if(!e.currentTarget.contains(e.relatedTarget)) setDragging(false)}}
          onDrop={handleDrop}>
 
-      {/* Drag overlay */}
-      {dragging&&(
-        <div style={{position:"absolute",inset:0,background:"rgba(37,99,235,0.08)",
-                     border:"2px dashed #2563eb",borderRadius:0,zIndex:10,pointerEvents:"none",
-                     display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,
-                     fontWeight:600,color:"#2563eb"}}>
+      {dragging && (
+        <div style={{position:"absolute", inset:0, background:"rgba(37,99,235,0.08)",
+                     border:"2px dashed #2563eb", zIndex:10, pointerEvents:"none",
+                     display:"flex", alignItems:"center", justifyContent:"center",
+                     fontSize:16, fontWeight:600, color:"#2563eb"}}>
           Drop files to upload
         </div>
       )}
 
-      {/* Top bar */}
-      <div style={{padding:"12px 24px",borderBottom:"1px solid #e5e7eb",background:"#fff",
-                   display:"flex",alignItems:"center",gap:10,flexWrap:"wrap"}}>
-        <span style={{fontSize:13,color:"#6b7280"}}>
-          {docs.length===0?"Drop files or upload to start":"Docs:"}
+      <div style={{padding:"12px 24px", borderBottom:"1px solid #e5e7eb", background:"#fff",
+                   display:"flex", alignItems:"center", gap:10, flexWrap:"wrap"}}>
+        <span style={{fontSize:13, color:"#6b7280"}}>
+          {docs.length===0 ? "Drop files or upload to start" : "Docs:"}
         </span>
-        {docs.slice(0,3).map((d,i)=><span key={i} style={S.tag()}>{d.name}</span>)}
-        {docs.length>3&&<span style={S.tag()}>+{docs.length-3} more</span>}
-        <div style={{marginLeft:"auto",display:"flex",gap:8}}>
-          {msgs.length>0&&(
-            <button onClick={exportChat} style={{...S.btn("secondary"),padding:"6px 12px",fontSize:12}}>
+        {docs.slice(0,3).map((d,i) => <span key={i} style={S.tag()}>{d.name}</span>)}
+        {docs.length>3 && <span style={S.tag()}>+{docs.length-3} more</span>}
+        <div style={{marginLeft:"auto", display:"flex", gap:8}}>
+          {msgs.length>0 && (
+            <button onClick={exportChat} style={{...S.btn("secondary"), padding:"6px 12px", fontSize:12}}>
               ⬇ Export chat
             </button>
           )}
-          <UploadBtn onDone={loadDocs}/>
+          <UploadBtn onDone={loadDocs} />
         </div>
       </div>
 
-      {/* Messages */}
-      <div style={{flex:1,overflowY:"auto",padding:24,display:"flex",flexDirection:"column",gap:16}}>
-        {msgs.length===0&&!streamingMsg&&(
-          <div style={{margin:"auto",textAlign:"center",color:"#9ca3af"}}>
-            <div style={{fontSize:36,marginBottom:8}}>💬</div>
+      <div style={{flex:1, overflowY:"auto", padding:24, display:"flex", flexDirection:"column", gap:16}}>
+        {msgs.length===0 && !streamingMsg && (
+          <div style={{margin:"auto", textAlign:"center", color:"#9ca3af"}}>
+            <div style={{fontSize:36, marginBottom:8}}>💬</div>
             <div style={{fontSize:14}}>Upload documents and ask anything</div>
-            <div style={{fontSize:12,marginTop:4,color:"#d1d5db"}}>
-              You can also drag and drop files anywhere on this page
+            <div style={{fontSize:12, marginTop:4}}>
+              Every citation is verified ✓ ⚠ ✗ against the source after each answer
             </div>
           </div>
         )}
-        {msgs.map((m,i)=><Bubble key={i} m={m}/>)}
-        {streamingMsg&&<Bubble m={{...streamingMsg,role:"assistant"}} streaming/>}
-        <div ref={end}/>
+        {msgs.map((m,i) => <Bubble key={i} m={m} />)}
+        {streamingMsg && <Bubble m={{...streamingMsg, role:"assistant"}} streaming />}
+        <div ref={end} />
       </div>
 
-      {/* Input */}
-      <div style={{padding:16,borderTop:"1px solid #e5e7eb",background:"#fff",display:"flex",gap:8}}>
-        <input value={inp} onChange={e=>setInp(e.target.value)}
-          onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&send()}
+      <div style={{padding:16, borderTop:"1px solid #e5e7eb", background:"#fff", display:"flex", gap:8}}>
+        <input value={inp} onChange={e => setInp(e.target.value)}
+          onKeyDown={e => e.key==="Enter" && !e.shiftKey && send()}
           placeholder="Ask a question across all uploaded documents…"
-          style={{flex:1,...S.inp}}/>
+          style={{flex:1, ...S.inp}} />
         <button onClick={send} disabled={busy} style={S.btn()}>Ask</button>
       </div>
-      <style>{`@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}`}</style>
+
+      <style>{`
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+        @keyframes spin  { from{transform:rotate(0deg)} to{transform:rotate(360deg)} }
+      `}</style>
     </div>
   )
 }
 
 // ── Compare ───────────────────────────────────────────────────────────────────
 function Compare() {
-  const [docs,setDocs]     = useState([])
-  const [d1,setD1]         = useState("")
-  const [d2,setD2]         = useState("")
-  const [result,setResult] = useState(null)
-  const [busy,setBusy]     = useState(false)
-  const loadDocs = () => get("/stats").then(d=>setDocs(d.documents||[]))
+  const [docs,setDocs]=useState([])
+  const [d1,setD1]=useState(""); const [d2,setD2]=useState("")
+  const [result,setResult]=useState(null); const [busy,setBusy]=useState(false)
+  const loadDocs = () => get("/stats").then(d => setDocs(d.documents||[]))
   useEffect(()=>{loadDocs()},[])
-
   async function run() {
     if(!d1||!d2||d1===d2) return alert("Select two different documents")
     setBusy(true); setResult(null)
-    setResult(await post("/compare",{doc1_name:d1,doc2_name:d2}))
-    setBusy(false)
+    setResult(await post("/compare",{doc1_name:d1,doc2_name:d2})); setBusy(false)
   }
-
   return (
     <div style={S.body}>
       <div style={S.card}>
@@ -372,7 +419,6 @@ function Compare() {
         </button>
         {docs.length===0&&<div style={{marginTop:10,fontSize:12,color:"#9ca3af"}}>Upload two files above to get started.</div>}
       </div>
-
       {result?.error&&<div style={{...S.card,background:"#fef2f2",borderColor:"#fca5a5",color:"#b91c1c",fontSize:13}}>{result.error}</div>}
       {result?.comparison&&(
         <div style={S.card}>
@@ -398,14 +444,11 @@ function Compare() {
 
 // ── Reports ───────────────────────────────────────────────────────────────────
 function Reports() {
-  const [docs,setDocs]     = useState([])
-  const [docName,setDoc]   = useState("")
-  const [rtype,setRtype]   = useState("summary")
-  const [result,setResult] = useState(null)
-  const [busy,setBusy]     = useState(false)
-  const loadDocs = () => get("/stats").then(d=>setDocs(d.documents||[]))
+  const [docs,setDocs]=useState([])
+  const [docName,setDoc]=useState(""); const [rtype,setRtype]=useState("summary")
+  const [result,setResult]=useState(null); const [busy,setBusy]=useState(false)
+  const loadDocs = () => get("/stats").then(d => setDocs(d.documents||[]))
   useEffect(()=>{loadDocs()},[])
-
   return (
     <div style={S.body}>
       <div style={S.card}>
@@ -433,7 +476,6 @@ function Reports() {
         <button onClick={async()=>{setBusy(true);setResult(null);setResult(await post("/report",{doc_name:docName||null,report_type:rtype}));setBusy(false)}}
           disabled={busy} style={S.btn()}>{busy?"Generating…":"Generate report"}</button>
       </div>
-
       {result?.error&&<div style={{...S.card,background:"#fef2f2",borderColor:"#fca5a5",color:"#b91c1c",fontSize:13}}>{result.error}</div>}
       {result?.report&&(
         <div style={S.card}>
@@ -474,16 +516,16 @@ export default function App() {
           </button>
         ))}
         <div style={{marginTop:"auto",fontSize:11,color:"#d1d5db",lineHeight:1.9}}>
-          Multi-doc RAG<br/>Semantic chunking<br/>Hybrid search<br/>Multi-query<br/>
-          Page citations<br/>Streaming<br/>Semantic cache<br/>PDF reports
+          Multi-doc RAG<br/>Hybrid + multi-query<br/>Citation verification<br/>
+          Streaming<br/>Semantic cache<br/>PDF reports
         </div>
       </div>
       <div style={S.main}>
         <div style={S.hdr}>{TITLES[tab]}</div>
-        {tab==="dashboard"&&<Dashboard/>}
-        {tab==="chat"     &&<Chat/>}
-        {tab==="compare"  &&<Compare/>}
-        {tab==="reports"  &&<Reports/>}
+        {tab==="dashboard" && <Dashboard/>}
+        {tab==="chat"      && <Chat/>}
+        {tab==="compare"   && <Compare/>}
+        {tab==="reports"   && <Reports/>}
       </div>
     </div>
   )
