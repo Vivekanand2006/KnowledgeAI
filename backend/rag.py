@@ -51,7 +51,12 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
 
-groq_client = Groq(api_key=GROQ_API_KEY)
+
+groq_client = Groq(
+    api_key=GROQ_API_KEY,
+    timeout=60.0,
+    max_retries=5
+)
 GROQ_MODEL = "openai/gpt-oss-20b"
 
 # FastEmbed uses ONNX Runtime instead of the PyTorch-based Sentence Transformers
