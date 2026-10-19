@@ -50,7 +50,9 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+# .strip() removes any stray newline/space/quotes pasted into the env var,
+# which would otherwise cause "Illegal header value" -> APIConnectionError.
+GROQ_API_KEY = (os.getenv("GROQ_API_KEY") or "").strip().strip('"').strip("'")
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
 
