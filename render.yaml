@@ -1,14 +1,13 @@
+
 services:
   - type: web
     name: knowledgeai-backend
-    env: python
+    runtime: python
+    plan: free
     region: singapore
+    rootDir: backend
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
       - key: GROQ_API_KEY
         sync: false
-    disk:
-      name: chroma-storage
-      mountPath: /opt/render/project/src/chroma_db
-      sizeGB: 1
