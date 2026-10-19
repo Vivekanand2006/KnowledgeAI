@@ -170,12 +170,12 @@ function Dashboard() {
     return () => window.clearInterval(timer)
   }, [load])
 
-  if (!stats && !error) return <div style={S.body}>Loading dashboard…</div>
-  if (error && !stats) return <div style={S.body}><div style={S.error}>{error}</div><button onClick={load} style={S.btn()}>Retry</button></div>
+  if (!stats && !error) return <div className="ka-page-content" style={S.body}>Loading dashboard…</div>
+  if (error && !stats) return <div className="ka-page-content" style={S.body}><div style={S.error}>{error}</div><button onClick={load} style={S.btn()}>Retry</button></div>
 
   const documents = stats.documents || []
   const iconFor = name => name?.endsWith(".pdf") ? "📕" : name?.endsWith(".docx") ? "📘" : name?.endsWith(".pptx") ? "📙" : name?.endsWith(".xlsx") ? "📗" : "📄"
-  return <div style={S.body}>
+  return <div className="ka-page-content" style={S.body}>
     {error && <div style={S.error}>{error}</div>}
     <div style={S.grid}>
       {[["📄", "Documents", documents.length], ["💬", "Questions", stats.questions_asked ?? 0], ["⚖️", "Comparisons", stats.comparisons_done ?? 0], ["📊", "Reports", stats.reports_generated ?? 0]].map(([icon, label, value]) => <div key={label} style={S.stat}>
@@ -203,7 +203,7 @@ function ChatBubble({ message, streaming = false }) {
   const isAssistant = message.role === "assistant"
   const verifying = streaming && message.content && !message.citations?.length
   return <div style={{ display: "flex", flexDirection: "column", alignItems: isAssistant ? "flex-start" : "flex-end", width: "100%" }}>
-    <div style={{ maxWidth: " min(85%, 800px)", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: isAssistant ? "#fff" : "#2563eb", color: isAssistant ? "#111827" : "#fff", border: isAssistant ? "1px solid #e5e7eb" : "none" }}>
+    <div className="ka-chat-bubble-content" style={{ maxWidth: "min(85%, 800px)", padding: "10px 14px", borderRadius: 12, fontSize: 13, lineHeight: 1.7, whiteSpace: "pre-wrap", overflowWrap: "anywhere", background: isAssistant ? "#fff" : "#2563eb", color: isAssistant ? "#111827" : "#fff", border: isAssistant ? "1px solid #e5e7eb" : "none" }}>
       {message.content || (streaming ? "" : "")}
       {streaming && <span style={{ animation: "blink 0.8s step-end infinite", marginLeft: 2 }}>▌</span>}
     </div>
@@ -357,25 +357,25 @@ function Chat() {
     }
   }
 
-  return <div style={{ ...S.main, height: "100%", position: "relative" }} onDragOver={event => { event.preventDefault(); setDragging(true) }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false) }} onDrop={handleDrop}>
+  return <div className="ka-chat" style={{ ...S.main, height: "100%", position: "relative" }} onDragOver={event => { event.preventDefault(); setDragging(true) }} onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setDragging(false) }} onDrop={handleDrop}>
     {dragging && <div style={{ position: "absolute", inset: 0, background: "rgba(37,99,235,0.08)", border: "2px dashed #2563eb", zIndex: 10, pointerEvents: "none", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 16, fontWeight: 600, color: "#2563eb" }}>Drop files to upload</div>}
-    <div style={{ padding: "12px 24px", borderBottom: "1px solid #e5e7eb", background: "#fff", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-      <span style={{ fontSize: 13, color: "#6b7280" }}>{docs.length === 0 ? "Drop files or upload to start" : "Docs:"}</span>
-      {docs.slice(0, 3).map((doc, index) => <span key={`${doc.name}-${index}`} style={S.tag()}>{doc.name}</span>)}
-      {docs.length > 3 && <span style={S.tag()}>+{docs.length - 3} more</span>}
-      <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
+    <div className="ka-chat-toolbar" style={{ padding: "12px 24px", borderBottom: "1px solid #e5e7eb", background: "#fff", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+      <span className="ka-doc-label" style={{ fontSize: 13, color: "#6b7280" }}>{docs.length === 0 ? "Drop files or upload to start" : "Docs:"}</span>
+      <div className="ka-doc-tags">{docs.slice(0, 3).map((doc, index) => <span className="ka-tag" key={`${doc.name}-${index}`} style={S.tag()}>{doc.name}</span>)}
+      {docs.length > 3 && <span className="ka-tag" style={S.tag()}>+{docs.length - 3} more</span>}</div>
+      <div className="ka-chat-actions" style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
         {messages.length > 0 && <button onClick={exportChat} style={{ ...S.btn("secondary"), padding: "6px 12px", fontSize: 12 }}>⬇ Export chat</button>}
         <UploadBtn onDone={reloadDocs} />
       </div>
     </div>
-    <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
+    <div className="ka-chat-messages" style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
       {!messages.length && !streamingMessage && <div style={{ margin: "auto", textAlign: "center", color: "#9ca3af" }}><div style={{ fontSize: 36, marginBottom: 8 }}>💬</div><div style={{ fontSize: 14 }}>Upload documents and ask anything</div><div style={{ fontSize: 12, marginTop: 4 }}>Citations are checked against retrieved source chunks.</div></div>}
       {messages.map((message, index) => <ChatBubble key={`${message.role}-${index}`} message={message} />)}
       {streamingMessage && <ChatBubble message={streamingMessage} streaming />}
       <div ref={bottomRef} />
     </div>
-    <div style={{ padding: 16, borderTop: "1px solid #e5e7eb", background: "#fff", display: "flex", gap: 8 }}>
-      <input value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="Ask a question across all uploaded documents…" style={{ flex: 1, ...S.inp }} />
+    <div className="ka-chat-composer" style={{ padding: 16, borderTop: "1px solid #e5e7eb", background: "#fff", display: "flex", gap: 8 }}>
+      <input className="ka-chat-input" value={input} onChange={event => setInput(event.target.value)} onKeyDown={event => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); send() } }} placeholder="Ask a question across all uploaded documents…" style={{ flex: 1, ...S.inp }} />
       <button onClick={send} disabled={busy || !input.trim()} style={{ ...S.btn(), opacity: busy || !input.trim() ? 0.6 : 1, cursor: busy || !input.trim() ? "not-allowed" : "pointer" }}>{busy ? "Thinking…" : "Ask"}</button>
     </div>
     <style>{`@keyframes blink {0%,100%{opacity:1} 50%{opacity:0}} @keyframes spin {from{transform:rotate(0deg)} to{transform:rotate(360deg)}}`}</style>
@@ -398,7 +398,7 @@ function Compare() {
     finally { setBusy(false) }
   }
 
-  return <div style={S.body}>
+  return <div className="ka-page-content" style={S.body}>
     <div style={S.card}>
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Select two documents to compare</div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}><UploadBtn onDone={reload} label="📎 Upload new file" />{docs.length > 0 && <span style={{ fontSize: 12, color: "#9ca3af" }}>{docs.length} file(s) available</span>}</div>
@@ -429,7 +429,7 @@ function Reports() {
     finally { setBusy(false) }
   }
 
-  return <div style={S.body}>
+  return <div className="ka-page-content" style={S.body}>
     <div style={S.card}>
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 14 }}>Generate AI report</div>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14 }}><UploadBtn onDone={reload} label="📎 Upload new file" /></div>
@@ -456,20 +456,129 @@ const TABS = [
 ]
 const TITLES = { dashboard: "Dashboard", chat: "Document chat", compare: "Document comparison", reports: "Report generator" }
 
+const RESPONSIVE_CSS = `
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body, #root { width: 100%; min-width: 0; min-height: 100%; margin: 0; }
+  body { overflow: hidden; }
+  button, input, select, textarea { font: inherit; }
+  button { touch-action: manipulation; }
+  .ka-app { width: 100%; height: 100vh !important; height: 100dvh !important; min-height: 0; overflow: hidden; }
+  .ka-sidebar { min-width: 0; height: 100%; overflow-y: auto; overscroll-behavior: contain; }
+  .ka-main { min-width: 0 !important; min-height: 0; height: 100%; overflow: hidden; }
+  .ka-page-content { width: 100%; min-width: 0; overflow-y: auto; overflow-x: hidden; }
+  .ka-chat { width: 100%; min-width: 0; min-height: 0; }
+  .ka-chat-toolbar { min-width: 0; flex-shrink: 0; }
+  .ka-doc-tags { display: contents; }
+  .ka-chat-actions { flex-shrink: 0; }
+  .ka-chat-messages { min-width: 0; overflow-x: hidden; overflow-wrap: anywhere; overscroll-behavior: contain; }
+  .ka-chat-bubble-content { min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+  .ka-chat-composer { min-width: 0; flex-shrink: 0; padding-bottom: max(10px, env(safe-area-inset-bottom)); }
+  .ka-chat-input { min-width: 0 !important; }
+  .ka-mobile-menu-button, .ka-nav-backdrop { display: none; }
+  .ka-card { min-width: 0; overflow-wrap: anywhere; }
+  @media (max-width: 768px) {
+    .ka-app { position: relative; }
+    .ka-sidebar {
+      position: fixed !important;
+      inset: 0 auto 0 0;
+      width: min(82vw, 290px) !important;
+      max-width: 290px;
+      height: 100vh !important;
+      height: 100dvh !important;
+      z-index: 1002;
+      flex: 0 0 auto !important;
+      padding: 16px !important;
+      background: #fff;
+      box-shadow: 8px 0 28px rgba(15, 23, 42, .16);
+      transform: translateX(-105%);
+      visibility: hidden;
+      transition: transform .22s ease, visibility .22s ease;
+    }
+    .ka-sidebar.ka-sidebar-open { transform: translateX(0); visibility: visible; }
+    .ka-nav-backdrop {
+      display: block;
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100vh;
+      height: 100dvh;
+      padding: 0;
+      border: 0;
+      border-radius: 0;
+      z-index: 1001;
+      background: rgba(15, 23, 42, .42);
+    }
+    .ka-main { width: 100% !important; max-width: 100%; flex: 1 1 0 !important; }
+    .ka-header { min-height: 54px; padding: 9px 13px !important; gap: 10px !important; font-size: 15px !important; }
+    .ka-mobile-menu-button {
+      display: inline-flex !important;
+      align-items: center;
+      justify-content: center;
+      flex: 0 0 36px;
+      width: 36px;
+      height: 36px;
+      padding: 0;
+      border: 0;
+      border-radius: 9px;
+      background: #eff6ff;
+      color: #2563eb;
+      font-size: 21px;
+      cursor: pointer;
+    }
+    .ka-page-content { padding: 12px !important; }
+    .ka-card { padding: 14px !important; margin-bottom: 12px !important; }
+    .ka-chat-toolbar { padding: 10px 12px !important; gap: 8px !important; align-items: flex-start !important; }
+    .ka-doc-label { padding-top: 5px; }
+    .ka-doc-tags { display: flex; flex: 1 1 calc(100% - 55px); min-width: 0; flex-wrap: wrap; gap: 5px; }
+    .ka-doc-tags .ka-tag { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+    .ka-chat-actions { display: flex; width: 100%; margin-left: 0 !important; justify-content: flex-end; flex-wrap: wrap; }
+    .ka-chat-actions button, .ka-chat-actions label { max-width: 100%; }
+    .ka-chat-messages { padding: 12px !important; gap: 12px !important; }
+    .ka-chat-bubble-content { max-width: min(94%, 800px) !important; padding: 10px 12px !important; font-size: 14px !important; line-height: 1.6 !important; }
+    .ka-chat-composer { padding: 10px !important; padding-bottom: max(10px, env(safe-area-inset-bottom)) !important; gap: 7px !important; align-items: center; }
+    .ka-chat-input { width: 0; flex: 1 1 auto; min-height: 42px; padding: 10px !important; font-size: 16px !important; }
+    .ka-chat-composer > button { flex: 0 0 auto; padding: 10px 13px !important; white-space: nowrap; }
+    .ka-page-content div[style*="grid-template-columns"] { grid-template-columns: minmax(0, 1fr) !important; }
+    .ka-page-content select, .ka-page-content input { max-width: 100%; min-width: 0; }
+  }
+  @media (max-width: 420px) {
+    .ka-header { font-size: 14px !important; }
+    .ka-chat-toolbar { padding: 9px !important; }
+    .ka-chat-actions { justify-content: flex-start; }
+    .ka-chat-actions button, .ka-chat-actions label { padding-left: 10px !important; padding-right: 10px !important; font-size: 11px !important; }
+    .ka-chat-messages { padding: 10px !important; }
+    .ka-chat-bubble-content { max-width: 96% !important; }
+    .ka-page-content { padding: 10px !important; }
+    .ka-card { padding: 12px !important; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .ka-sidebar { transition: none; }
+  }
+`
+
 export default function App() {
   const [tab, setTab] = useState("dashboard")
-  return <div style={S.app}>
-    <div style={S.side}>
-      <div style={S.logo}><div style={S.dot} />KnowledgeAI</div>
-      {TABS.map(item => <button key={item.id} onClick={() => setTab(item.id)} style={S.nav(tab === item.id)}><span>{item.icon}</span>{item.label}</button>)}
-      <div style={{ marginTop: "auto", fontSize: 11, color: "#d1d5db", lineHeight: 1.9 }}>Multi-doc RAG<br />Hybrid + multi-query<br />Citation verification<br />Streaming<br />Semantic cache<br />PDF reports</div>
+  const [mobileNavOpen, setMobileNavOpen] = useState(false)
+
+  return <>
+    <div className="ka-app" style={S.app}>
+      {mobileNavOpen && <button className="ka-nav-backdrop" aria-label="Close navigation" onClick={() => setMobileNavOpen(false)} />}
+      <aside className={`ka-sidebar${mobileNavOpen ? " ka-sidebar-open" : ""}`} style={S.side} aria-label="Main navigation">
+        <div style={S.logo}><div style={S.dot} />KnowledgeAI</div>
+        {TABS.map(item => <button key={item.id} onClick={() => { setTab(item.id); setMobileNavOpen(false) }} style={S.nav(tab === item.id)}><span>{item.icon}</span>{item.label}</button>)}
+        <div style={{ marginTop: "auto", fontSize: 11, color: "#d1d5db", lineHeight: 1.9 }}>Multi-doc RAG<br />Hybrid + multi-query<br />Citation verification<br />Streaming<br />Semantic cache<br />PDF reports</div>
+      </aside>
+      <div className="ka-main" style={S.main}>
+        <div className="ka-header" style={{ ...S.hdr, display: "flex", alignItems: "center", gap: 12 }}>
+          <button className="ka-mobile-menu-button" onClick={() => setMobileNavOpen(true)} aria-label="Open navigation">☰</button>
+          <span>{TITLES[tab]}</span>
+        </div>
+        {tab === "dashboard" && <Dashboard />}
+        {tab === "chat" && <Chat />}
+        {tab === "compare" && <Compare />}
+        {tab === "reports" && <Reports />}
+      </div>
     </div>
-    <div style={S.main}>
-      <div style={S.hdr}>{TITLES[tab]}</div>
-      {tab === "dashboard" && <Dashboard />}
-      {tab === "chat" && <Chat />}
-      {tab === "compare" && <Compare />}
-      {tab === "reports" && <Reports />}
-    </div>
-  </div>
+    <style>{RESPONSIVE_CSS}</style>
+  </>
 }
