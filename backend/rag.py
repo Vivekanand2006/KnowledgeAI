@@ -16,6 +16,7 @@ All features:
 
 import io
 import json
+import logging
 import os
 from typing import Iterable
 
@@ -45,6 +46,8 @@ except ImportError:
 
 from dotenv import load_dotenv
 
+logger = logging.getLogger(__name__)
+
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
@@ -57,7 +60,39 @@ groq_client = Groq(
     timeout=60.0,
     max_retries=5
 )
-GROQ_MODEL = "openai/gpt-oss-20b"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
+
+
+def _exception_chain(exc: BaseException, max_depth: int = 5) -> str:
+    """Return exception types/messages without logging prompts or credentials."""
+    parts = []
+    current = exc
+    seen = set()
+    for _ in range(max_depth):
+        if current is None or id(current) in seen:
+            break
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    return " -> ".join(parts)
+
+
+def _log_groq_failure(operation: str, exc: BaseException) -> None:
+    """Log the useful network cause while avoiding API keys and prompt text."""
+    logger.error(
+        "[Groq] %s failed; exception_chain=%s",
+        operation,
+        _exception_chain(exc),
+        exc_info=(type(exc), exc, exc.__traceback__),
+    )
+
+
+def _sse(event: dict) -> str:
+    """Serialize one Server-Sent Events payload."""
+    return f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+SSE_DONE = "data: [DONE]\n\n"
 
 # FastEmbed uses ONNX Runtime instead of the PyTorch-based Sentence Transformers
 # stack. Lazy loading defers model loading until the first embedding request.
@@ -80,7 +115,7 @@ class EmbeddingAdapter:
         show_progress_bar: bool = False,
     ) -> np.ndarray:
         # Small batches reduce peak memory use on Render's free instance.
-        vectors = list(self.model.embed(texts, batch_size=16))
+        vectors = list(self.model.embed(texts, batch_size=8))
         result = np.asarray(vectors, dtype=np.float32)
         return result if convert_to_numpy else result.tolist()
 
@@ -137,7 +172,7 @@ def _ensure_embedding_backend(records: dict) -> None:
             f"[Startup] Updating {len(ids)} stored embeddings to "
             f"{EMBEDDING_BACKEND}..."
         )
-        batch_size = 16
+        batch_size = 8
         for start_index in range(0, len(ids), batch_size):
             batch_ids = ids[start_index:start_index + batch_size]
             batch_docs = documents[start_index:start_index + batch_size]
@@ -185,12 +220,14 @@ _load_from_chromadb()
 
 # ── Extractors ────────────────────────────────────────────────────────────────
 def _extract_pdf(data, name):
-    doc = fitz.open(stream=data, filetype="pdf")
     pages = []
-    for n, page in enumerate(doc, 1):
-        txt = page.get_text().strip()
-        if txt: pages.append({"text": txt, "page": n, "doc_name": name})
-    return pages, len(doc)
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        total_pages = len(doc)
+        for n, page in enumerate(doc, 1):
+            txt = page.get_text().strip()
+            if txt:
+                pages.append({"text": txt, "page": n, "doc_name": name})
+    return pages, total_pages
 
 def _extract_docx(data, name):
     if not DocxDoc: return [], 0
@@ -220,7 +257,7 @@ def _extract_txt(data, name):
 
 EXTRACTORS = {
     "pdf": _extract_pdf, "docx": _extract_docx, "pptx": _extract_pptx,
-    "xlsx": _extract_excel, "xls": _extract_excel, "txt": _extract_txt,
+    "xlsx": _extract_excel, "txt": _extract_txt,
 }
 
 
@@ -280,7 +317,8 @@ def _expand_query(question: str) -> list:
         )
         alts = [l.strip() for l in resp.choices[0].message.content.strip().split("\n") if l.strip()]
         return [question] + alts[:2]
-    except Exception:
+    except Exception as exc:
+        logger.warning("[Groq] Multi-query expansion failed: %s", _exception_chain(exc))
         return [question]
 
 
@@ -294,7 +332,8 @@ def _generate_summary(text: str) -> str:
             temperature=0, max_tokens=100,
         )
         return resp.choices[0].message.content.strip()
-    except Exception:
+    except Exception as exc:
+        logger.warning("[Groq] Document summary generation failed: %s", _exception_chain(exc))
         return ""
 
 
@@ -404,93 +443,159 @@ def process_document(data: bytes, filename: str) -> dict:
 
 # ── answer_question (non-streaming) ──────────────────────────────────────────
 def answer_question(question: str, chat_history: list | None = None) -> dict:
+    """Answer a question with retrieval context and verified citations."""
     if not all_chunks:
         return {"error": "No documents uploaded yet."}
+
     chat_history = chat_history or []
 
-    q_vec  = embedder.encode([question], convert_to_numpy=True)[0]
-    cached = _cache_lookup(q_vec)
-    if cached: return {**cached, "from_cache": True}
+    try:
+        q_vec = embedder.encode([question], convert_to_numpy=True)[0]
+        cached = _cache_lookup(q_vec)
+        if cached:
+            return {**cached, "from_cache": True}
 
-    top_hits, confidence, context = _retrieve(question, q_vec)
-    prompt = _build_prompt(question, context, chat_history)
+        top_hits, confidence, context = _retrieve(question, q_vec)
+        prompt = _build_prompt(question, context, chat_history)
+    except Exception as exc:
+        logger.exception("[RAG] Non-streaming query preparation failed: %s", _exception_chain(exc))
+        return {"error": "KnowledgeAI could not prepare your question. Please try again."}
 
-    resp   = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0, max_tokens=512,
-    )
-    answer = resp.choices[0].message.content
+    try:
+        response = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0,
+            max_tokens=512,
+        )
+    except Exception as exc:
+        _log_groq_failure("non-streaming answer generation", exc)
+        return {"error": "The AI service connection failed. Please try again shortly."}
 
-    # Verify citations against source chunks
-    verified_citations = resolve_citations(answer, top_hits)
+    answer = (response.choices[0].message.content or "").strip()
+    if not answer:
+        return {
+            "error": "The AI service returned an empty answer. Please try again.",
+            "confidence": confidence,
+        }
+
+    try:
+        verified_citations = resolve_citations(answer, top_hits)
+    except Exception:
+        logger.exception("[RAG] Non-streaming citation verification failed.")
+        verified_citations = []
 
     _cache_save(q_vec, answer, verified_citations, confidence)
-    return {"answer": answer, "citations": verified_citations,
-            "confidence": confidence, "from_cache": False}
+    return {
+        "answer": answer,
+        "citations": verified_citations,
+        "confidence": confidence,
+        "from_cache": False,
+    }
 
 
 # ── stream_answer (SSE generator) ────────────────────────────────────────────
 def stream_answer(question: str, chat_history: list | None = None):
-    """
-    Event order:
-      1. {"type":"confidence", "confidence":87, "from_cache":false}
-      2. {"type":"text",       "content":"word"}  ← repeated per token
-      3. {"type":"citations",  "citations":[...]} ← verified, sent AFTER full answer
-      4. [DONE]
-    """
+    """Stream confidence, answer tokens, and verified citations using SSE."""
     if not all_chunks:
-        yield f"data: {json.dumps({'type':'error','content':'No documents uploaded yet.'})}\n\n"
+        yield _sse({"type": "error", "content": "No documents uploaded yet."})
+        yield SSE_DONE
         return
+
     chat_history = chat_history or []
 
-    q_vec  = embedder.encode([question], convert_to_numpy=True)[0]
-    cached = _cache_lookup(q_vec)
+    # Embedding and retrieval can also fail (for example, during first model load).
+    try:
+        q_vec = embedder.encode([question], convert_to_numpy=True)[0]
+        cached = _cache_lookup(q_vec)
+        if cached:
+            yield _sse({
+                "type": "confidence",
+                "confidence": cached["confidence"],
+                "from_cache": True,
+            })
+            yield _sse({"type": "text", "content": cached["answer"]})
+            yield _sse({"type": "citations", "citations": cached["citations"]})
+            yield SSE_DONE
+            return
 
-    if cached:
-        yield f"data: {json.dumps({'type':'confidence','confidence':cached['confidence'],'from_cache':True})}\n\n"
-        yield f"data: {json.dumps({'type':'text','content':cached['answer']})}\n\n"
-        yield f"data: {json.dumps({'type':'citations','citations':cached['citations']})}\n\n"
-        yield "data: [DONE]\n\n"
+        top_hits, confidence, context = _retrieve(question, q_vec)
+        prompt = _build_prompt(question, context, chat_history)
+    except Exception as exc:
+        logger.exception("[RAG] Query preparation failed: %s", _exception_chain(exc))
+        yield _sse({
+            "type": "error",
+            "content": "KnowledgeAI could not prepare your question. Please try again.",
+        })
+        yield SSE_DONE
         return
 
-    top_hits, confidence, context = _retrieve(question, q_vec)
+    # Emit confidence only after retrieval has succeeded.
+    yield _sse({"type": "confidence", "confidence": confidence, "from_cache": False})
 
-    # Send confidence first so UI knows answer is coming
-    yield f"data: {json.dumps({'type':'confidence','confidence':confidence,'from_cache':False})}\n\n"
-
-    # Stream answer token by token
-    prompt      = _build_prompt(question, context, chat_history)
-    stream      = groq_client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[{"role": "user", "content": prompt}],
-        stream=True, temperature=0, max_tokens=512,
-    )
     full_answer = ""
-    for chunk in stream:
-        token = chunk.choices[0].delta.content or ""
-        if token:
-            full_answer += token
-            yield f"data: {json.dumps({'type':'text','content':token})}\n\n"
+    try:
+        response_stream = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+            temperature=0,
+            max_tokens=512,
+        )
 
-    # After full answer received → verify citations → send to frontend
-    # Truncate answer to avoid overloading the citation resolver
-    verified_citations = resolve_citations(full_answer[:500], top_hits)
-    yield f"data: {json.dumps({'type':'citations','citations':verified_citations})}\n\n"
-    yield "data: [DONE]\n\n"
+        for chunk in response_stream:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                continue
+            token = choices[0].delta.content or ""
+            if token:
+                full_answer += token
+                yield _sse({"type": "text", "content": token})
+    except Exception as exc:
+        _log_groq_failure("streaming answer", exc)
+        yield _sse({
+            "type": "error",
+            "content": "The AI service connection failed. Please try again shortly.",
+        })
+        yield SSE_DONE
+        return
+
+    if not full_answer.strip():
+        logger.warning("[Groq] Streaming completed without answer text.")
+        yield _sse({
+            "type": "error",
+            "content": "The AI service returned an empty answer. Please try again.",
+        })
+        yield SSE_DONE
+        return
+
+    try:
+        # Keep the original citation resolver behavior, bounded to avoid oversized input.
+        verified_citations = resolve_citations(full_answer[:500], top_hits)
+    except Exception:
+        logger.exception("[RAG] Citation verification failed.")
+        verified_citations = []
 
     _cache_save(q_vec, full_answer, verified_citations, confidence)
+    yield _sse({"type": "citations", "citations": verified_citations})
+    yield SSE_DONE
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 def clear_documents():
+    """Delete indexed documents from ChromaDB and reset in-memory state."""
     global all_chunks, doc_texts, doc_summaries, bm25_index, semantic_cache, chunk_counter
-    try:
-        ids = collection.get()["ids"]
-        if ids: collection.delete(ids=ids)
-    except Exception: pass
-    all_chunks.clear(); doc_texts.clear(); doc_summaries.clear()
-    semantic_cache.clear(); bm25_index = None; chunk_counter = 0
+
+    ids = collection.get(include=["metadatas"])["ids"]
+    if ids:
+        collection.delete(ids=ids)
+
+    all_chunks.clear()
+    doc_texts.clear()
+    doc_summaries.clear()
+    semantic_cache.clear()
+    bm25_index = None
+    chunk_counter = 0
 
 def get_doc_text(name: str)    -> str:  return doc_texts.get(name, "")
 def get_doc_summary(name: str) -> str:  return doc_summaries.get(name, "")
