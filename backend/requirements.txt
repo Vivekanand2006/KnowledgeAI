@@ -1,8 +1,9 @@
+
 fastapi
 uvicorn
 python-multipart
 PyMuPDF
-sentence-transformers
+fastembed
 groq
 numpy
 python-docx
@@ -11,3 +12,4 @@ openpyxl
 reportlab
 chromadb
 rank_bm25
+python-dotenv

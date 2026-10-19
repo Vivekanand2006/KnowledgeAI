@@ -14,62 +14,91 @@ All features:
   ✓ Citation resolver   Verifies every citation ✓ ⚠ ✗
 """
 
-import io, os, json
-import numpy as np
-from groq import Groq
-import chromadb
-from rank_bm25 import BM25Okapi
-from sentence_transformers import SentenceTransformer
-import fitz
-
-from citation_resolver import resolve_citations  # ← citation verification
-
-try:    from docx import Document as DocxDoc
-except: DocxDoc = None
-try:    from pptx import Presentation
-except: Presentation = None
-try:    import openpyxl
-except: openpyxl = None
-
-
-# ── Models ────────────────────────────────────────────────────────────────────
+import io
+import json
 import os
+from typing import Iterable
+
+import chromadb
+import fitz
+import numpy as np
+from fastembed import TextEmbedding
 from groq import Groq
-from sentence_transformers import SentenceTransformer
+from rank_bm25 import BM25Okapi
 
-print("[KnowledgeAI] Loading embedding model…")
+from citation_resolver import resolve_citations
 
-embedder = SentenceTransformer("all-MiniLM-L6-v2")
+try:
+    from docx import Document as DocxDoc
+except ImportError:
+    DocxDoc = None
 
-# Put your Groq API key directly here
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
+
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
 from dotenv import load_dotenv
+
 load_dotenv()
 
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 if not GROQ_API_KEY:
     raise RuntimeError("GROQ_API_KEY is missing")
 
 groq_client = Groq(api_key=GROQ_API_KEY)
-
-# Warm-up embedding model
-embedder.encode(["warmup"], convert_to_numpy=True)
-
-print("[KnowledgeAI] Ready.")
-
 GROQ_MODEL = "openai/gpt-oss-20b"
 
-# Warm-up embedding model
-embedder.encode(["warmup"], convert_to_numpy=True)
+# FastEmbed uses ONNX Runtime instead of the PyTorch-based Sentence Transformers
+# stack. Lazy loading defers model loading until the first embedding request.
+EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+EMBEDDING_BACKEND = f"fastembed:{EMBEDDING_MODEL}"
 
-print("[KnowledgeAI] Ready.")
+print("[KnowledgeAI] Configuring FastEmbed model...")
 
+
+class EmbeddingAdapter:
+    """Keep the embedder.encode() interface used throughout this file."""
+
+    def __init__(self, model: TextEmbedding):
+        self.model = model
+
+    def encode(
+        self,
+        texts: Iterable[str],
+        convert_to_numpy: bool = True,
+        show_progress_bar: bool = False,
+    ) -> np.ndarray:
+        # Small batches reduce peak memory use on Render's free instance.
+        vectors = list(self.model.embed(texts, batch_size=16))
+        result = np.asarray(vectors, dtype=np.float32)
+        return result if convert_to_numpy else result.tolist()
+
+
+embedder = EmbeddingAdapter(
+    TextEmbedding(
+        model_name=EMBEDDING_MODEL,
+        threads=1,
+        lazy_load=True,
+    )
+)
+
+print("[KnowledgeAI] FastEmbed configured.")
 
 # ── ChromaDB ──────────────────────────────────────────────────────────────────
 os.makedirs("chroma_db", exist_ok=True)
 chroma_client = chromadb.PersistentClient(path="./chroma_db")
-collection    = chroma_client.get_or_create_collection(
-    "knowledge_ai", metadata={"hnsw:space": "l2"}
+collection = chroma_client.get_or_create_collection(
+    "knowledge_ai",
+    metadata={
+        "hnsw:space": "l2",
+        "embedding_backend": EMBEDDING_BACKEND,
+    },
 )
 
 
@@ -86,22 +115,65 @@ def _rebuild_bm25():
     bm25_index = BM25Okapi([c["text"].split() for c in all_chunks]) if all_chunks else None
 
 
-# ── Startup: reload ChromaDB data into memory ─────────────────────────────────
+# ── Startup: migrate/reload ChromaDB data ─────────────────────────────────────
+def _ensure_embedding_backend(records: dict) -> None:
+    """
+    Re-embed existing records once if their vectors were created by a different
+    implementation. This prevents comparing FastEmbed query vectors with old
+    Sentence Transformers vectors.
+    """
+    metadata = dict(collection.metadata or {})
+    stored_backend = metadata.get("embedding_backend")
+    ids = records.get("ids") or []
+
+    if stored_backend != EMBEDDING_BACKEND and ids:
+        documents = records.get("documents") or []
+        print(
+            f"[Startup] Updating {len(ids)} stored embeddings to "
+            f"{EMBEDDING_BACKEND}..."
+        )
+        batch_size = 16
+        for start_index in range(0, len(ids), batch_size):
+            batch_ids = ids[start_index:start_index + batch_size]
+            batch_docs = documents[start_index:start_index + batch_size]
+            vectors = embedder.encode(batch_docs, show_progress_bar=False)
+            collection.update(
+                ids=batch_ids,
+                embeddings=[vector.tolist() for vector in vectors],
+            )
+
+    if stored_backend != EMBEDDING_BACKEND:
+        metadata["embedding_backend"] = EMBEDDING_BACKEND
+        metadata.setdefault("hnsw:space", "l2")
+        collection.modify(metadata=metadata)
+        if ids:
+            print("[Startup] Existing embeddings updated.")
+
+
 def _load_from_chromadb():
     global chunk_counter
     try:
-        ex = collection.get(include=["documents", "metadatas"])
-        if not ex["ids"]: return
-        print(f"[Startup] Reloading {len(ex['ids'])} chunks…")
-        for text, meta in zip(ex["documents"], ex["metadatas"]):
+        records = collection.get(include=["documents", "metadatas"])
+        _ensure_embedding_backend(records)
+
+        if not records["ids"]:
+            print("[Startup] ChromaDB collection is empty.")
+            return
+
+        print(f"[Startup] Reloading {len(records['ids'])} chunks...")
+        for text, meta in zip(records["documents"], records["metadatas"]):
+            meta = meta or {}
             name = meta.get("doc_name", "unknown")
-            all_chunks.append({"text": text, "doc_name": name, "page": meta.get("page", 1)})
+            page = meta.get("page", 1)
+            all_chunks.append({"text": text, "doc_name": name, "page": page})
             doc_texts[name] = doc_texts.get(name, "") + " " + text
+
         chunk_counter = len(all_chunks)
         _rebuild_bm25()
         print(f"[Startup] {len(all_chunks)} chunks / {len(doc_texts)} docs loaded.")
-    except Exception as e:
-        print(f"[Startup] Warning: {e}")
+    except Exception as exc:
+        print(f"[Startup] Warning while loading ChromaDB: {exc}")
+
 
 _load_from_chromadb()
 
@@ -326,8 +398,10 @@ def process_document(data: bytes, filename: str) -> dict:
 
 
 # ── answer_question (non-streaming) ──────────────────────────────────────────
-def answer_question(question: str, chat_history: list = []) -> dict:
-    if not all_chunks: return {"error": "No documents uploaded yet."}
+def answer_question(question: str, chat_history: list | None = None) -> dict:
+    if not all_chunks:
+        return {"error": "No documents uploaded yet."}
+    chat_history = chat_history or []
 
     q_vec  = embedder.encode([question], convert_to_numpy=True)[0]
     cached = _cache_lookup(q_vec)
@@ -352,7 +426,7 @@ def answer_question(question: str, chat_history: list = []) -> dict:
 
 
 # ── stream_answer (SSE generator) ────────────────────────────────────────────
-def stream_answer(question: str, chat_history: list = []):
+def stream_answer(question: str, chat_history: list | None = None):
     """
     Event order:
       1. {"type":"confidence", "confidence":87, "from_cache":false}
@@ -363,6 +437,7 @@ def stream_answer(question: str, chat_history: list = []):
     if not all_chunks:
         yield f"data: {json.dumps({'type':'error','content':'No documents uploaded yet.'})}\n\n"
         return
+    chat_history = chat_history or []
 
     q_vec  = embedder.encode([question], convert_to_numpy=True)[0]
     cached = _cache_lookup(q_vec)
